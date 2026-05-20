@@ -38,6 +38,7 @@ def identificar_tokens(texto):
 class NodoAST:
     def traducirPy(self):   raise NotImplementedError(f"{type(self).__name__}.traducirPy()")
     def traducirJava(self):  raise NotImplementedError(f"{type(self).__name__}.traducirJava()")
+    def traducirC(self):     raise NotImplementedError(f"{type(self).__name__}.traducirC()")
     def generarCodigo(self): raise NotImplementedError(f"{type(self).__name__}.generarCodigo()")
     def optimizar(self):     return self
 
@@ -46,25 +47,32 @@ class NodoPrograma(NodoAST):
         self.globales = globales
         self.funciones = funciones
         self.main = main
-        
+
     def traducirPy(self):
         partes = [g.traducirPy() for g in self.globales]
         partes.extend([f.traducirPy() for f in self.funciones])
         if self.main: partes.append(self.main.traducirPy())
         return "\n\n".join(partes).strip()
-        
+
     def traducirJava(self):
         partes = ["    static " + g.traducirJava() for g in self.globales]
         partes.extend([f.traducirJava() for f in self.funciones])
         if self.main: partes.append(self.main.traducirJava())
         return "public class Programa {\n" + "\n\n".join(partes) + "\n}"
-        
+
+    def traducirC(self):
+        partes = ["#include <stdio.h>", "#include <stdbool.h>", ""]
+        partes.extend([g.traducirC() for g in self.globales])
+        partes.extend([f.traducirC() for f in self.funciones])
+        if self.main: partes.append(self.main.traducirC())
+        return "\n\n".join(partes).strip()
+
     def generarCodigo(self):
         partes = [g.generarCodigo() for g in self.globales]
         partes.extend([f.generarCodigo() for f in self.funciones])
         if self.main: partes.append(self.main.generarCodigo())
         return "\n\n".join(partes).strip()
-        
+
     def optimizar(self):
         return NodoPrograma(
             [g.optimizar() for g in self.globales],
@@ -78,20 +86,32 @@ class NodoFuncion(NodoAST):
         self.nombre = nombre
         self.parametros = parametros
         self.cuerpo = cuerpo
+
     def traducirPy(self):
         params = ', '.join(p.traducirPy() for p in self.parametros)
         cuerpo = "\n    ".join(c.traducirPy() for c in self.cuerpo) or "pass"
         return f"def {self.nombre[1]}({params}):\n    {cuerpo}"
+
     def traducirJava(self):
         params = ', '.join(p.traducirJava() for p in self.parametros)
         cuerpo = "\n        ".join(c.traducirJava() for c in self.cuerpo)
         if self.nombre[1] == 'main':
             return f"    public static void main(String[] args) {{\n        {cuerpo}\n    }}"
         return f"    public static {self.tipo_retorno[1]} {self.nombre[1]}({params}) {{\n        {cuerpo}\n    }}"
+
+    def traducirC(self):
+        params = ', '.join(p.traducirC() for p in self.parametros)
+        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo)
+        if self.nombre[1] == 'main':
+            return f"int main() {{\n    {cuerpo}\n    return 0;\n}}"
+        tipo = "int" if self.tipo_retorno[1] == "bool" else self.tipo_retorno[1]
+        return f"{tipo} {self.nombre[1]}({params}) {{\n    {cuerpo}\n}}"
+
     def generarCodigo(self):
         cuerpo = "\n    ".join(c.generarCodigo() for c in self.cuerpo)
         ps = ', '.join(p.nombre[1] for p in self.parametros)
         return f"; === {self.nombre[1]}({ps}) -> {self.tipo_retorno[1]} ===\n{self.nombre[1]}:\n    {cuerpo}"
+
     def optimizar(self):
         return NodoFuncion(self.tipo_retorno, self.nombre,
                            self.parametros, [c.optimizar() for c in self.cuerpo])
@@ -99,23 +119,38 @@ class NodoFuncion(NodoAST):
 class NodoParametro(NodoAST):
     def __init__(self, nombre, tipo, es_array=False):
         self.nombre = nombre; self.tipo = tipo; self.es_array = es_array
+
     def traducirPy(self): return self.nombre[1]
     def traducirJava(self): return f"{self.tipo[1]}{'[]' if self.es_array else ''} {self.nombre[1]}"
+    def traducirC(self): return f"{self.tipo[1]} {'*' if self.es_array else ''}{self.nombre[1]}"
     def generarCodigo(self): return f"; param {self.tipo[1]} {self.nombre[1]}"
 
 class NodoAsignacion(NodoAST):
     def __init__(self, tipo, nombre, expresion, es_declaracion=True):
         self.tipo = tipo; self.nombre = nombre
         self.expresion = expresion; self.es_declaracion = es_declaracion
+
     def traducirPy(self):
         return f"{self.nombre[1]} = {self.expresion.traducirPy()}"
+
     def traducirJava(self):
         expr = self.expresion.traducirJava()
         if self.es_declaracion and self.tipo:
             return f"{self.tipo[1]} {self.nombre[1]} = {expr};"
         return f"{self.nombre[1]} = {expr};"
+
+    def traducirC(self):
+        expr = self.expresion.traducirC()
+        if self.es_declaracion and self.tipo:
+            tipo = self.tipo[1]
+            if tipo == "bool":
+                tipo = "int"
+            return f"{tipo} {self.nombre[1]} = {expr};"
+        return f"{self.nombre[1]} = {expr};"
+
     def generarCodigo(self):
         return f"MOV {self.nombre[1]}, {self.expresion.generarCodigo()}"
+
     def optimizar(self):
         return NodoAsignacion(self.tipo, self.nombre, self.expresion.optimizar(), self.es_declaracion)
 
@@ -123,35 +158,53 @@ class NodoDeclaracionArray(NodoAST):
     def __init__(self, tipo, nombre, tamanio, valores=None):
         self.tipo = tipo; self.nombre = nombre
         self.tamanio = tamanio; self.valores = valores or []
+
     def traducirPy(self):
         if self.valores:
             return f"{self.nombre[1]} = [{', '.join(v.traducirPy() for v in self.valores)}]"
         return f"{self.nombre[1]} = [0] * {self.tamanio}"
+
     def traducirJava(self):
         if self.valores:
             vals = ', '.join(v.traducirJava() for v in self.valores)
             return f"{self.tipo[1]}[] {self.nombre[1]} = {{{vals}}};"
         return f"{self.tipo[1]}[] {self.nombre[1]} = new {self.tipo[1]}[{self.tamanio}];"
+
+    def traducirC(self):
+        if self.valores:
+            vals = ', '.join(v.traducirC() for v in self.valores)
+            return f"{self.tipo[1]} {self.nombre[1]}[] = {{{vals}}};"
+        return f"{self.tipo[1]} {self.nombre[1]}[{self.tamanio}];"
+
     def generarCodigo(self):
         return f"ALLOC {self.nombre[1]}, {self.tamanio} ; {self.tipo[1]}[]"
 
 class NodoAsignacionArray(NodoAST):
     def __init__(self, nombre, indice, expresion):
         self.nombre = nombre; self.indice = indice; self.expresion = expresion
+
     def traducirPy(self):
         return f"{self.nombre[1]}[{self.indice.traducirPy()}] = {self.expresion.traducirPy()}"
+
     def traducirJava(self):
         return f"{self.nombre[1]}[{self.indice.traducirJava()}] = {self.expresion.traducirJava()};"
+
+    def traducirC(self):
+        return f"{self.nombre[1]}[{self.indice.traducirC()}] = {self.expresion.traducirC()};"
+
     def generarCodigo(self):
         return f"MOV {self.nombre[1]}[{self.indice.generarCodigo()}], {self.expresion.generarCodigo()}"
+
     def optimizar(self):
         return NodoAsignacionArray(self.nombre, self.indice.optimizar(), self.expresion.optimizar())
 
 class NodoAccesoArray(NodoAST):
     def __init__(self, nombre, indice):
         self.nombre = nombre; self.indice = indice
+
     def traducirPy(self): return f"{self.nombre[1]}[{self.indice.traducirPy()}]"
     def traducirJava(self): return f"{self.nombre[1]}[{self.indice.traducirJava()}]"
+    def traducirC(self): return f"{self.nombre[1]}[{self.indice.traducirC()}]"
     def generarCodigo(self): return f"LOAD {self.nombre[1]}[{self.indice.generarCodigo()}]"
     def optimizar(self): return NodoAccesoArray(self.nombre, self.indice.optimizar())
 
@@ -159,16 +212,24 @@ class NodoOperacion(NodoAST):
     _ASM = {'+':'ADD','-':'SUB','*':'MUL','/':'DIV','==':'CMP_EQ','!=':'CMP_NEQ',
             '<':'CMP_LT','>':'CMP_GT','<=':'CMP_LE','>=':'CMP_GE','&&':'AND','||':'OR'}
     _PY  = {'&&':'and','||':'or'}
+
     def __init__(self, izquierda, operador, derecha):
         self.izquierda = izquierda; self.operador = operador; self.derecha = derecha
+
     def traducirPy(self):
         op = self._PY.get(self.operador[1], self.operador[1])
         return f"({self.izquierda.traducirPy()} {op} {self.derecha.traducirPy()})"
+
     def traducirJava(self):
         return f"({self.izquierda.traducirJava()} {self.operador[1]} {self.derecha.traducirJava()})"
+
+    def traducirC(self):
+        return f"({self.izquierda.traducirC()} {self.operador[1]} {self.derecha.traducirC()})"
+
     def generarCodigo(self):
         op = self._ASM.get(self.operador[1], self.operador[1])
         return f"{op} {self.izquierda.generarCodigo()}, {self.derecha.generarCodigo()}"
+
     def optimizar(self):
         izq = self.izquierda.optimizar()
         der = self.derecha.optimizar()
@@ -184,14 +245,17 @@ class NodoOperacion(NodoAST):
 
 class NodoNegacion(NodoAST):
     def __init__(self, expresion): self.expresion = expresion
+
     def traducirPy(self): return f"not ({self.expresion.traducirPy()})"
     def traducirJava(self): return f"!({self.expresion.traducirJava()})"
+    def traducirC(self): return f"!({self.expresion.traducirC()})"
     def generarCodigo(self): return f"NOT {self.expresion.generarCodigo()}"
     def optimizar(self): return NodoNegacion(self.expresion.optimizar())
 
 class NodoIf(NodoAST):
     def __init__(self, condicion, cuerpo_if, cuerpo_else=None):
         self.condicion = condicion; self.cuerpo_if = cuerpo_if; self.cuerpo_else = cuerpo_else
+
     def traducirPy(self):
         cuerpo = "\n    ".join(c.traducirPy() for c in self.cuerpo_if) or "pass"
         r = f"if {self.condicion.traducirPy()}:\n    {cuerpo}"
@@ -199,6 +263,7 @@ class NodoIf(NodoAST):
             eb = "\n    ".join(c.traducirPy() for c in self.cuerpo_else) or "pass"
             r += f"\nelse:\n    {eb}"
         return r
+
     def traducirJava(self):
         cuerpo = "\n        ".join(c.traducirJava() for c in self.cuerpo_if)
         r = f"if ({self.condicion.traducirJava()}) {{\n        {cuerpo}\n    }}"
@@ -206,6 +271,15 @@ class NodoIf(NodoAST):
             eb = "\n        ".join(c.traducirJava() for c in self.cuerpo_else)
             r += f" else {{\n        {eb}\n    }}"
         return r
+
+    def traducirC(self):
+        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo_if)
+        r = f"if ({self.condicion.traducirC()}) {{\n    {cuerpo}\n}}"
+        if self.cuerpo_else:
+            eb = "\n    ".join(c.traducirC() for c in self.cuerpo_else)
+            r += f" else {{\n    {eb}\n}}"
+        return r
+
     def generarCodigo(self):
         uid = abs(id(self)) % 100000
         le, lend = f"else_{uid}", f"endif_{uid}"
@@ -215,6 +289,7 @@ class NodoIf(NodoAST):
             eb = "\n    ".join(c.generarCodigo() for c in self.cuerpo_else)
             r += f"\n    {eb}"
         return r + f"\n{lend}:"
+
     def optimizar(self):
         return NodoIf(self.condicion.optimizar(),
                       [c.optimizar() for c in self.cuerpo_if],
@@ -223,17 +298,25 @@ class NodoIf(NodoAST):
 class NodoWhile(NodoAST):
     def __init__(self, condicion, cuerpo):
         self.condicion = condicion; self.cuerpo = cuerpo
+
     def traducirPy(self):
         cuerpo = "\n    ".join(c.traducirPy() for c in self.cuerpo) or "pass"
         return f"while {self.condicion.traducirPy()}:\n    {cuerpo}"
+
     def traducirJava(self):
         cuerpo = "\n        ".join(c.traducirJava() for c in self.cuerpo)
         return f"while ({self.condicion.traducirJava()}) {{\n        {cuerpo}\n    }}"
+
+    def traducirC(self):
+        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo)
+        return f"while ({self.condicion.traducirC()}) {{\n    {cuerpo}\n}}"
+
     def generarCodigo(self):
         uid = abs(id(self)) % 100000
         ls, le = f"while_{uid}", f"endwhile_{uid}"
         cuerpo = "\n    ".join(c.generarCodigo() for c in self.cuerpo)
         return f"{ls}:\n    CMP {self.condicion.generarCodigo()}\n    JZ {le}\n    {cuerpo}\n    JMP {ls}\n{le}:"
+
     def optimizar(self):
         return NodoWhile(self.condicion.optimizar(), [c.optimizar() for c in self.cuerpo])
 
@@ -241,18 +324,28 @@ class NodoFor(NodoAST):
     def __init__(self, init, condicion, incremento, cuerpo):
         self.init = init; self.condicion = condicion
         self.incremento = incremento; self.cuerpo = cuerpo
+
     def traducirPy(self):
         init  = self.init.traducirPy() if self.init else ""
         cond  = self.condicion.traducirPy() if self.condicion else "True"
         inc   = self.incremento.traducirPy() if self.incremento else ""
         cuerpo = "\n    ".join(c.traducirPy() for c in self.cuerpo) or "pass"
         return f"{init}\nwhile {cond}:\n    {cuerpo}\n    {inc}"
+
     def traducirJava(self):
         init  = (self.init.traducirJava().rstrip(";") if self.init else "")
         cond  = self.condicion.traducirJava() if self.condicion else "true"
         inc   = (self.incremento.traducirJava().rstrip(";") if self.incremento else "")
         cuerpo = "\n        ".join(c.traducirJava() for c in self.cuerpo)
         return f"for ({init}; {cond}; {inc}) {{\n        {cuerpo}\n    }}"
+
+    def traducirC(self):
+        init  = (self.init.traducirC().rstrip(";") if self.init else "")
+        cond  = self.condicion.traducirC() if self.condicion else "1"
+        inc   = (self.incremento.traducirC().rstrip(";") if self.incremento else "")
+        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo)
+        return f"for ({init}; {cond}; {inc}) {{\n    {cuerpo}\n}}"
+
     def generarCodigo(self):
         uid = abs(id(self)) % 100000
         ls, le = f"for_{uid}", f"endfor_{uid}"
@@ -261,6 +354,7 @@ class NodoFor(NodoAST):
         inc   = self.incremento.generarCodigo() if self.incremento else ""
         cuerpo = "\n    ".join(c.generarCodigo() for c in self.cuerpo)
         return f"{init}\n{ls}:\n    CMP {cond}\n    JZ {le}\n    {cuerpo}\n    {inc}\n    JMP {ls}\n{le}:"
+
     def optimizar(self):
         return NodoFor(
             self.init.optimizar() if self.init else None,
@@ -270,76 +364,106 @@ class NodoFor(NodoAST):
 
 class NodoRetorno(NodoAST):
     def __init__(self, expresion): self.expresion = expresion
+
     def traducirPy(self):
         return f"return {self.expresion.traducirPy()}" if self.expresion else "return"
+
     def traducirJava(self):
         return f"return {self.expresion.traducirJava()};" if self.expresion else "return;"
+
+    def traducirC(self):
+        return f"return {self.expresion.traducirC()};" if self.expresion else "return;"
+
     def generarCodigo(self):
         return f"MOV eax, {self.expresion.generarCodigo()}\n    RET" if self.expresion else "RET"
+
     def optimizar(self):
         return NodoRetorno(self.expresion.optimizar() if self.expresion else None)
 
 class NodoIdentificador(NodoAST):
     def __init__(self, nombre): self.nombre = nombre
+
     def traducirPy(self): return self.nombre[1]
     def traducirJava(self): return self.nombre[1]
+    def traducirC(self): return self.nombre[1]
     def generarCodigo(self): return self.nombre[1]
 
 class NodoNumero(NodoAST):
     def __init__(self, valor): self.valor = valor
+
     def traducirPy(self): return str(self.valor[1])
     def traducirJava(self): return str(self.valor[1])
+    def traducirC(self): return str(self.valor[1])
     def generarCodigo(self): return str(self.valor[1])
 
 class NodoFloat(NodoAST):
     def __init__(self, valor): self.valor = valor
+
     def traducirPy(self): return str(self.valor[1])
     def traducirJava(self): return f"{self.valor[1]}f"
+    def traducirC(self): return f"{self.valor[1]}f"
     def generarCodigo(self): return str(self.valor[1])
 
 class NodoString(NodoAST):
     def __init__(self, valor): self.valor = valor
+
     def traducirPy(self): return self.valor[1]
     def traducirJava(self): return self.valor[1]
+    def traducirC(self): return self.valor[1]
     def generarCodigo(self): return f'DB {self.valor[1]}, 0'
 
 class NodoBoolean(NodoAST):
     def __init__(self, valor): self.valor = valor
+
     def traducirPy(self): return "True" if self.valor[1] == "true" else "False"
     def traducirJava(self): return self.valor[1]
+    def traducirC(self): return "1" if self.valor[1] == "true" else "0"
     def generarCodigo(self): return "1" if self.valor[1] == "true" else "0"
 
 class NodoLlamadaFuncion(NodoAST):
     def __init__(self, nombre_funcion, argumentos):
         self.nombre_funcion = nombre_funcion; self.argumentos = argumentos
+
     def traducirPy(self):
         return f"{self.nombre_funcion}({', '.join(a.traducirPy() for a in self.argumentos)})"
+
     def traducirJava(self):
         return f"{self.nombre_funcion}({', '.join(a.traducirJava() for a in self.argumentos)})"
+
+    def traducirC(self):
+        return f"{self.nombre_funcion}({', '.join(a.traducirC() for a in self.argumentos)})"
+
     def generarCodigo(self):
         args = ', '.join(a.generarCodigo() for a in self.argumentos)
         return f"CALL {self.nombre_funcion} ; args=({args})"
 
 class NodoPrint(NodoAST):
     def __init__(self, expresion): self.expresion = expresion
+
     def traducirPy(self): return f"print({self.expresion.traducirPy()})"
     def traducirJava(self): return f"System.out.println({self.expresion.traducirJava()});"
+    def traducirC(self): return f'printf("%d\\n", {self.expresion.traducirC()});'
     def generarCodigo(self): return f"PRINT {self.expresion.generarCodigo()}"
     def optimizar(self): return NodoPrint(self.expresion.optimizar())
 
 class NodoPrintf(NodoAST):
     def __init__(self, expresion): self.expresion = expresion
+
     def traducirPy(self): return f"print({self.expresion.traducirPy()})"
     def traducirJava(self): return f"System.out.printf({self.expresion.traducirJava()});"
+    def traducirC(self): return f"printf({self.expresion.traducirC()});"
     def generarCodigo(self): return f"PRINTF {self.expresion.generarCodigo()}"
     def optimizar(self): return NodoPrintf(self.expresion.optimizar())
 
 class NodoIncrementoDecremento(NodoAST):
     def __init__(self, nombre, operador):
         self.nombre = nombre; self.operador = operador
+
     def traducirPy(self):
         return f"{self.nombre[1]} += 1" if self.operador == "++" else f"{self.nombre[1]} -= 1"
+
     def traducirJava(self): return f"{self.nombre[1]}{self.operador};"
+    def traducirC(self): return f"{self.nombre[1]}{self.operador};"
     def generarCodigo(self):
         return f"INC {self.nombre[1]}" if self.operador == "++" else f"DEC {self.nombre[1]}"
 
@@ -387,7 +511,6 @@ class SistemaTipos:
 
     @staticmethod
     def tipo_resultante(t1, t2, operador):
-        # Promoción de tipos
         if t1 == 'float' or t2 == 'float':
             return 'float'
         return 'int'
@@ -518,8 +641,6 @@ class Parser:
         funciones = []
         globales = []
         while self.actual() and self.actual()[1] != 'main':
-            # Miramos el token actual (tipo) y el siguiente (nombre)
-            # Si el token que le sigue al nombre es '(', es una función
             if self.pos + 2 < len(self.tokens) and self.tokens[self.pos + 2][1] == '(':
                 funciones.append(self.funcion())
             else:
@@ -582,11 +703,9 @@ class Parser:
     def declaracion(self):
         tipo = self.coincidir("KEYWORDS")
         nombre = self.coincidir("IDENTIFIER")
-        # Array con tamaño: int arr[5];
         if self.actual() and self.actual()[1] == '[':
             self.coincidir_valor("[")
             if self.actual() and self.actual()[1] == ']':
-                # int arr[] = {1,2,3};
                 self.coincidir_valor("]")
                 self.coincidir_valor("=")
                 self.coincidir_valor("{")
@@ -613,14 +732,12 @@ class Parser:
 
     def instruccion_identificador(self):
         nombre = self.coincidir("IDENTIFIER")
-        # Llamada a función
         if self.actual() and self.actual()[1] == '(':
             self.coincidir_valor("(")
             args = self.argumentos()
             self.coincidir_valor(")")
             self.coincidir_valor(";")
             return NodoLlamadaFuncion(nombre[1], args)
-        # Asignación array
         if self.actual() and self.actual()[1] == '[':
             self.coincidir_valor("[")
             indice = self.expresion()
@@ -629,12 +746,10 @@ class Parser:
             expr = self.expresion()
             self.coincidir_valor(";")
             return NodoAsignacionArray(nombre, indice, expr)
-        # Incremento/decremento
         if self.actual() and self.actual()[1] in ('++', '--'):
             op = self.actual()[1]; self.pos += 1
             self.coincidir_valor(";")
             return NodoIncrementoDecremento(nombre, op)
-        # Reasignación
         self.coincidir_valor("=")
         expr = self.expresion()
         self.coincidir_valor(";")
@@ -665,7 +780,6 @@ class Parser:
 
     def sentencia_for(self):
         self.coincidir_valor("for"); self.coincidir_valor("(")
-        # init
         init = None
         if self.actual() and self.actual()[1] != ';':
             if self.actual()[0] == 'KEYWORDS':
@@ -674,12 +788,10 @@ class Parser:
                 init = self.instruccion_identificador()
         else:
             self.coincidir_valor(";")
-        # condicion
         condicion = None
         if self.actual() and self.actual()[1] != ';':
             condicion = self.expresion()
         self.coincidir_valor(";")
-        # incremento
         incremento = None
         if self.actual() and self.actual()[1] != ')':
             nom = self.coincidir("IDENTIFIER")
@@ -704,7 +816,6 @@ class Parser:
         expr = self.expresion(); self.coincidir_valor(")"); self.coincidir_valor(";")
         return NodoPrintf(expr)
 
-    # ── Expresiones con precedencia correcta ──
     def expresion(self): return self.or_expr()
 
     def or_expr(self):
@@ -841,7 +952,7 @@ def serializar_ast(nodo):
 def compilar_codigo(codigo: str):
     res = {"tokens":[],"ast":{},"ast_optimizado":{},"tabla_simbolos":{},
            "errores_semanticos":[],"codigo_python":"","codigo_java":"",
-           "codigo_ensamblador":"","pasos":[],"exito":False}
+           "codigo_c":"","codigo_ensamblador":"","pasos":[],"exito":False}
     pasos = res["pasos"]
 
     pasos.append("Paso 1: Análisis léxico...")
@@ -882,7 +993,8 @@ def compilar_codigo(codigo: str):
     for label, key, method in [
         ("Paso 5: Python",      "codigo_python",      "traducirPy"),
         ("Paso 6: Java",         "codigo_java",        "traducirJava"),
-        ("Paso 7: Ensamblador", "codigo_ensamblador", "generarCodigo"),
+        ("Paso 7: C",            "codigo_c",           "traducirC"),
+        ("Paso 8: Ensamblador", "codigo_ensamblador", "generarCodigo"),
     ]:
         pasos.append(f"{label}...")
         try:
