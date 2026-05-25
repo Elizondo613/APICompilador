@@ -1,8 +1,13 @@
 import re
 import json
 import os
+import time
+import uuid
+import shutil
+import subprocess
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="Compilador API", version="2.0.0")
@@ -18,7 +23,7 @@ token_patron = {
     "KEYWORDS":      r'\b(if|else|while|for|return|int|float|void|char|bool|then|print|printf|true|false)\b',
     "IDENTIFIER":    r'\b[a-zA-Z_][a-zA-Z0-9_]*\b',
     "NUMBER":        r'\b\d+(\.\d+)?\b',
-    "OPERATORS":     r'==|!=|<=|>=|&&|\|\||[+\-*/=<>!]',
+    "OPERATORS":     r'\+\+|--|==|!=|<=|>=|&&|\|\||[+\-*/=<>!]',
     "DELIMITERS":    r'[\[\](),;{}]',
     "WHITESPACE":    r'\s+',
 }
@@ -58,6 +63,12 @@ class NodoPrograma(NodoAST):
         partes.extend([f.traducirJava() for f in self.funciones])
         if self.main: partes.append(self.main.traducirJava())
         return "public class Programa {\n" + "\n\n".join(partes) + "\n}"
+
+    def traducirC(self):
+        partes = [g.traducirC() for g in self.globales]
+        partes.extend([f.traducirC() for f in self.funciones])
+        if self.main: partes.append(self.main.traducirC())
+        return "#include <stdio.h>\n\n" + "\n\n".join(partes).strip()
         
     def generarCodigo(self):
         partes = [g.generarCodigo() for g in self.globales]
@@ -95,6 +106,12 @@ class NodoFuncion(NodoAST):
     def optimizar(self):
         return NodoFuncion(self.tipo_retorno, self.nombre,
                            self.parametros, [c.optimizar() for c in self.cuerpo])
+    def traducirC(self):
+        params = ', '.join(p.traducirC() for p in self.parametros)
+        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo)
+        if self.nombre[1] == 'main':
+            return f"int main() {{\n    {cuerpo}\n    system(\"pause\");\n    return 0;\n}}"
+        return f"{self.tipo_retorno[1]} {self.nombre[1]}({params}) {{\n    {cuerpo}\n}}"
 
 class NodoParametro(NodoAST):
     def __init__(self, nombre, tipo, es_array=False):
@@ -102,6 +119,7 @@ class NodoParametro(NodoAST):
     def traducirPy(self): return self.nombre[1]
     def traducirJava(self): return f"{self.tipo[1]}{'[]' if self.es_array else ''} {self.nombre[1]}"
     def generarCodigo(self): return f"; param {self.tipo[1]} {self.nombre[1]}"
+    def traducirC(self): return f"{self.tipo[1]}{'[]' if self.es_array else ''} {self.nombre[1]}"
 
 class NodoAsignacion(NodoAST):
     def __init__(self, tipo, nombre, expresion, es_declaracion=True):
@@ -118,6 +136,11 @@ class NodoAsignacion(NodoAST):
         return f"MOV {self.nombre[1]}, {self.expresion.generarCodigo()}"
     def optimizar(self):
         return NodoAsignacion(self.tipo, self.nombre, self.expresion.optimizar(), self.es_declaracion)
+    def traducirC(self):
+        expr = self.expresion.traducirC()
+        if self.es_declaracion and self.tipo:
+            return f"{self.tipo[1]} {self.nombre[1]} = {expr};"
+        return f"{self.nombre[1]} = {expr};"
 
 class NodoDeclaracionArray(NodoAST):
     def __init__(self, tipo, nombre, tamanio, valores=None):
@@ -134,6 +157,11 @@ class NodoDeclaracionArray(NodoAST):
         return f"{self.tipo[1]}[] {self.nombre[1]} = new {self.tipo[1]}[{self.tamanio}];"
     def generarCodigo(self):
         return f"ALLOC {self.nombre[1]}, {self.tamanio} ; {self.tipo[1]}[]"
+    def traducirC(self):
+        if self.valores:
+            vals = ', '.join(v.traducirC() for v in self.valores)
+            return f"{self.tipo[1]} {self.nombre[1]}[{self.tamanio}] = {{{vals}}};"
+        return f"{self.tipo[1]} {self.nombre[1]}[{self.tamanio}];"
 
 class NodoAsignacionArray(NodoAST):
     def __init__(self, nombre, indice, expresion):
@@ -144,6 +172,8 @@ class NodoAsignacionArray(NodoAST):
         return f"{self.nombre[1]}[{self.indice.traducirJava()}] = {self.expresion.traducirJava()};"
     def generarCodigo(self):
         return f"MOV {self.nombre[1]}[{self.indice.generarCodigo()}], {self.expresion.generarCodigo()}"
+    def traducirC(self):
+        return f"{self.nombre[1]}[{self.indice.traducirC()}] = {self.expresion.traducirC()};"
     def optimizar(self):
         return NodoAsignacionArray(self.nombre, self.indice.optimizar(), self.expresion.optimizar())
 
@@ -153,6 +183,7 @@ class NodoAccesoArray(NodoAST):
     def traducirPy(self): return f"{self.nombre[1]}[{self.indice.traducirPy()}]"
     def traducirJava(self): return f"{self.nombre[1]}[{self.indice.traducirJava()}]"
     def generarCodigo(self): return f"LOAD {self.nombre[1]}[{self.indice.generarCodigo()}]"
+    def traducirC(self): return f"{self.nombre[1]}[{self.indice.traducirC()}]"
     def optimizar(self): return NodoAccesoArray(self.nombre, self.indice.optimizar())
 
 class NodoOperacion(NodoAST):
@@ -169,6 +200,8 @@ class NodoOperacion(NodoAST):
     def generarCodigo(self):
         op = self._ASM.get(self.operador[1], self.operador[1])
         return f"{op} {self.izquierda.generarCodigo()}, {self.derecha.generarCodigo()}"
+    def traducirC(self):
+        return f"({self.izquierda.traducirC()} {self.operador[1]} {self.derecha.traducirC()})"
     def optimizar(self):
         izq = self.izquierda.optimizar()
         der = self.derecha.optimizar()
@@ -187,6 +220,7 @@ class NodoNegacion(NodoAST):
     def traducirPy(self): return f"not ({self.expresion.traducirPy()})"
     def traducirJava(self): return f"!({self.expresion.traducirJava()})"
     def generarCodigo(self): return f"NOT {self.expresion.generarCodigo()}"
+    def traducirC(self): return f"!({self.expresion.traducirC()})"
     def optimizar(self): return NodoNegacion(self.expresion.optimizar())
 
 class NodoIf(NodoAST):
@@ -215,6 +249,13 @@ class NodoIf(NodoAST):
             eb = "\n    ".join(c.generarCodigo() for c in self.cuerpo_else)
             r += f"\n    {eb}"
         return r + f"\n{lend}:"
+    def traducirC(self):
+        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo_if) or "    // TODO: cuerpo if"
+        r = f"if ({self.condicion.traducirC()}) {{\n{cuerpo}\n}}"
+        if self.cuerpo_else:
+            eb = "\n    ".join(c.traducirC() for c in self.cuerpo_else) or "    // TODO: cuerpo else"
+            r += f" else {{\n{eb}\n}}"
+        return r
     def optimizar(self):
         return NodoIf(self.condicion.optimizar(),
                       [c.optimizar() for c in self.cuerpo_if],
@@ -234,6 +275,9 @@ class NodoWhile(NodoAST):
         ls, le = f"while_{uid}", f"endwhile_{uid}"
         cuerpo = "\n    ".join(c.generarCodigo() for c in self.cuerpo)
         return f"{ls}:\n    CMP {self.condicion.generarCodigo()}\n    JZ {le}\n    {cuerpo}\n    JMP {ls}\n{le}:"
+    def traducirC(self):
+        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo) or "    // TODO: cuerpo while"
+        return f"while ({self.condicion.traducirC()}) {{\n{cuerpo}\n}}"
     def optimizar(self):
         return NodoWhile(self.condicion.optimizar(), [c.optimizar() for c in self.cuerpo])
 
@@ -261,6 +305,12 @@ class NodoFor(NodoAST):
         inc   = self.incremento.generarCodigo() if self.incremento else ""
         cuerpo = "\n    ".join(c.generarCodigo() for c in self.cuerpo)
         return f"{init}\n{ls}:\n    CMP {cond}\n    JZ {le}\n    {cuerpo}\n    {inc}\n    JMP {ls}\n{le}:"
+    def traducirC(self):
+        init  = self.init.traducirC().rstrip(";") if self.init else ""
+        cond  = self.condicion.traducirC() if self.condicion else "true"
+        inc   = self.incremento.traducirC().rstrip(";") if self.incremento else ""
+        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo) or "    // TODO: cuerpo for"
+        return f"for ({init}; {cond}; {inc}) {{\n{cuerpo}\n}}"
     def optimizar(self):
         return NodoFor(
             self.init.optimizar() if self.init else None,
@@ -276,6 +326,8 @@ class NodoRetorno(NodoAST):
         return f"return {self.expresion.traducirJava()};" if self.expresion else "return;"
     def generarCodigo(self):
         return f"MOV eax, {self.expresion.generarCodigo()}\n    RET" if self.expresion else "RET"
+    def traducirC(self):
+        return f"return {self.expresion.traducirC()};" if self.expresion else "return;"
     def optimizar(self):
         return NodoRetorno(self.expresion.optimizar() if self.expresion else None)
 
@@ -284,30 +336,35 @@ class NodoIdentificador(NodoAST):
     def traducirPy(self): return self.nombre[1]
     def traducirJava(self): return self.nombre[1]
     def generarCodigo(self): return self.nombre[1]
+    def traducirC(self): return self.nombre[1]
 
 class NodoNumero(NodoAST):
     def __init__(self, valor): self.valor = valor
     def traducirPy(self): return str(self.valor[1])
     def traducirJava(self): return str(self.valor[1])
     def generarCodigo(self): return str(self.valor[1])
+    def traducirC(self): return str(self.valor[1])
 
 class NodoFloat(NodoAST):
     def __init__(self, valor): self.valor = valor
     def traducirPy(self): return str(self.valor[1])
     def traducirJava(self): return f"{self.valor[1]}f"
     def generarCodigo(self): return str(self.valor[1])
+    def traducirC(self): return str(self.valor[1])
 
 class NodoString(NodoAST):
     def __init__(self, valor): self.valor = valor
     def traducirPy(self): return self.valor[1]
     def traducirJava(self): return self.valor[1]
     def generarCodigo(self): return f'DB {self.valor[1]}, 0'
+    def traducirC(self): return self.valor[1]
 
 class NodoBoolean(NodoAST):
     def __init__(self, valor): self.valor = valor
     def traducirPy(self): return "True" if self.valor[1] == "true" else "False"
     def traducirJava(self): return self.valor[1]
     def generarCodigo(self): return "1" if self.valor[1] == "true" else "0"
+    def traducirC(self): return self.valor[1]
 
 class NodoLlamadaFuncion(NodoAST):
     def __init__(self, nombre_funcion, argumentos):
@@ -319,12 +376,15 @@ class NodoLlamadaFuncion(NodoAST):
     def generarCodigo(self):
         args = ', '.join(a.generarCodigo() for a in self.argumentos)
         return f"CALL {self.nombre_funcion} ; args=({args})"
+    def traducirC(self):
+        return f"{self.nombre_funcion}({', '.join(a.traducirC() for a in self.argumentos)})"
 
 class NodoPrint(NodoAST):
     def __init__(self, expresion): self.expresion = expresion
     def traducirPy(self): return f"print({self.expresion.traducirPy()})"
     def traducirJava(self): return f"System.out.println({self.expresion.traducirJava()});"
     def generarCodigo(self): return f"PRINT {self.expresion.generarCodigo()}"
+    def traducirC(self): return f'printf("%d", {self.expresion.traducirC()});'
     def optimizar(self): return NodoPrint(self.expresion.optimizar())
 
 class NodoPrintf(NodoAST):
@@ -332,6 +392,7 @@ class NodoPrintf(NodoAST):
     def traducirPy(self): return f"print({self.expresion.traducirPy()})"
     def traducirJava(self): return f"System.out.printf({self.expresion.traducirJava()});"
     def generarCodigo(self): return f"PRINTF {self.expresion.generarCodigo()}"
+    def traducirC(self): return f'printf({self.expresion.traducirC()});'
     def optimizar(self): return NodoPrintf(self.expresion.optimizar())
 
 class NodoIncrementoDecremento(NodoAST):
@@ -342,6 +403,8 @@ class NodoIncrementoDecremento(NodoAST):
     def traducirJava(self): return f"{self.nombre[1]}{self.operador};"
     def generarCodigo(self):
         return f"INC {self.nombre[1]}" if self.operador == "++" else f"DEC {self.nombre[1]}"
+    def traducirC(self):
+        return f"{self.nombre[1]}{self.operador};"
 
 # ─────────────────────────────────────────────────────────────
 # TABLA DE SÍMBOLOS (con ámbitos)
@@ -841,7 +904,7 @@ def serializar_ast(nodo):
 def compilar_codigo(codigo: str):
     res = {"tokens":[],"ast":{},"ast_optimizado":{},"tabla_simbolos":{},
            "errores_semanticos":[],"codigo_python":"","codigo_java":"",
-           "codigo_ensamblador":"","pasos":[],"exito":False}
+           "codigo_ensamblador":"","codigo_c":"","pasos":[],"exito":False}
     pasos = res["pasos"]
 
     pasos.append("Paso 1: Análisis léxico...")
@@ -883,6 +946,7 @@ def compilar_codigo(codigo: str):
         ("Paso 5: Python",      "codigo_python",      "traducirPy"),
         ("Paso 6: Java",         "codigo_java",        "traducirJava"),
         ("Paso 7: Ensamblador", "codigo_ensamblador", "generarCodigo"),
+        ("Paso 8: C",           "codigo_c",           "traducirC")
     ]:
         pasos.append(f"{label}...")
         try:
@@ -904,9 +968,52 @@ class CodigoRequest(BaseModel):
 class ArchivoRequest(BaseModel):
     nombre: str
     contenido: str
+    formato: str = "cpp"  # "cpp", "asm", "py", "java", etc.
 
 ARCHIVOS_DIR = "archivos"
 os.makedirs(ARCHIVOS_DIR, exist_ok=True)
+
+
+def ejecutar_comando(comando, cwd=None):
+    try:
+        resultado = subprocess.run(comando, cwd=cwd, capture_output=True, text=True, check=True)
+        return resultado.stdout
+    except subprocess.CalledProcessError as e:
+        salida = e.stderr or e.stdout or str(e)
+        raise RuntimeError(f"Error al ejecutar {' '.join(comando)}: {salida.strip()}")
+
+
+def ensamblar_asm_a_obj(asm_path, obj_path):
+    if shutil.which("nasm"):
+        ejecutar_comando(["nasm", "-f", "win32", "-o", obj_path, asm_path])
+        return
+    if shutil.which("gcc"):
+        ejecutar_comando(["gcc", "-c", "-x", "assembler", "-o", obj_path, asm_path])
+        return
+    if shutil.which("clang"):
+        ejecutar_comando(["clang", "-c", "-x", "assembler", "-o", obj_path, asm_path])
+        return
+    if shutil.which("ml"):
+        ejecutar_comando(["ml", "/c", f"/Fo{obj_path}", asm_path])
+        return
+    raise RuntimeError("No se encontró ningún ensamblador compatible en el servidor.")
+
+
+def link_obj_a_exe(obj_path, exe_path):
+    if shutil.which("gcc"):
+        ejecutar_comando(["gcc", "-o", exe_path, obj_path])
+        return
+    if shutil.which("clang"):
+        ejecutar_comando(["clang", "-o", exe_path, obj_path])
+        return
+    if shutil.which("link"):
+        ejecutar_comando(["link", f"/OUT:{exe_path}", obj_path])
+        return
+    if shutil.which("cl"):
+        ejecutar_comando(["cl", "/Fe:" + exe_path, obj_path])
+        return
+    raise RuntimeError("No se encontró ningún enlazador compatible en el servidor.")
+
 
 @app.get("/")
 def root():
@@ -923,6 +1030,32 @@ def compilar(req: CodigoRequest):
         raise HTTPException(400, "El código no puede estar vacío")
     return compilar_codigo(req.codigo)
 
+@app.post("/compilar-guardar-asm")
+def compilar_guardar_asm(req: CodigoRequest):
+    """Compila código y guarda automáticamente el ensamblador en .asm"""
+    if not req.codigo.strip():
+        raise HTTPException(400, "El código no puede estar vacío")
+    
+    resultado = compilar_codigo(req.codigo)
+    
+    if not resultado["exito"]:
+        raise HTTPException(400, "Compilación fallida: " + str(resultado["errores_semanticos"]))
+    
+    # Generar nombre de archivo basado en timestamp
+    import time
+    nombre_archivo = f"programa_{int(time.time())}"
+    
+    try:
+        # Guardar ensamblador
+        with open(os.path.join(ARCHIVOS_DIR, nombre_archivo + ".asm"), 'w', encoding='utf-8') as f:
+            f.write(resultado["codigo_ensamblador"])
+        
+        resultado["archivo_guardado"] = nombre_archivo + ".asm"
+        resultado["ruta"] = os.path.join(ARCHIVOS_DIR, nombre_archivo + ".asm")
+        return resultado
+    except Exception as e:
+        raise HTTPException(500, f"Error al guardar: {str(e)}")
+
 @app.post("/tokens")
 def obtener_tokens(req: CodigoRequest):
     try:
@@ -933,17 +1066,110 @@ def obtener_tokens(req: CodigoRequest):
 
 @app.post("/archivos/guardar")
 def guardar_archivo(req: ArchivoRequest):
-    nombre = req.nombre if req.nombre.endswith(".cpp") else req.nombre + ".cpp"
+    # Determinar extensión basada en formato
+    extensiones = {"cpp": ".cpp", "asm": ".asm", "py": ".py", "java": ".java", "c": ".c"}
+    ext = extensiones.get(req.formato, ".cpp")
+    nombre = req.nombre if req.nombre.endswith(ext) else req.nombre + ext
     try:
         with open(os.path.join(ARCHIVOS_DIR, nombre), 'w', encoding='utf-8') as f:
             f.write(req.contenido)
-        return {"mensaje": f"'{nombre}' guardado", "nombre": nombre}
+        return {"mensaje": f"'{nombre}' guardado", "nombre": nombre, "formato": req.formato}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+@app.post("/compilar-crear-ejecutable")
+def compilar_crear_ejecutable(req: CodigoRequest):
+    if not req.codigo.strip():
+        raise HTTPException(400, "El código no puede estar vacío")
+
+    resultado = compilar_codigo(req.codigo)
+    if not resultado.get("exito"):
+        raise HTTPException(400, "Compilación fallida")
+
+    if not shutil.which("gcc"):
+        raise HTTPException(500, "GCC no encontrado. Instala MinGW/MSYS2.")
+
+    codigo_c = resultado.get("codigo_c", "")
+    if not codigo_c:
+        raise HTTPException(400, "No se generó código C")
+
+    # ── Inyectar scanf para variables marcadas como "entrada del usuario" ──
+    import re
+    def inyectar_scanf(c_code):
+        lineas = c_code.split("\n")
+        nuevas = []
+        for linea in lineas:
+            nuevas.append(linea)
+            # Detectar líneas como: int numero = 0; // entrada del usuario
+            m = re.match(r'\s*(int|float)\s+(\w+)\s*=\s*\S+;\s*//\s*entrada del usuario', linea)
+            if m:
+                tipo  = m.group(1)
+                var   = m.group(2)
+                fmt   = "%d" if tipo == "int" else "%f"
+                indent = len(linea) - len(linea.lstrip())
+                pad   = " " * indent
+                nuevas.append(f'{pad}printf("Ingresa {var}: ");')
+                nuevas.append(f'{pad}scanf("{fmt}", &{var});')
+        return "\n".join(nuevas)
+
+    codigo_c = inyectar_scanf(codigo_c)
+
+    timestamp = int(time.time())
+    base     = f"programa_{timestamp}"
+    c_ruta   = os.path.join(ARCHIVOS_DIR, base + ".c")
+    asm_ruta = os.path.join(ARCHIVOS_DIR, base + ".s")
+    exe_ruta = os.path.join(ARCHIVOS_DIR, base + ".exe")
+
+    try:
+        with open(c_ruta, 'w', encoding='utf-8') as f:
+            f.write(codigo_c)
+
+        proc_asm = subprocess.run(
+            ["gcc", "-S", "-masm=intel", c_ruta, "-o", asm_ruta],
+            capture_output=True, text=True
+        )
+        if proc_asm.returncode != 0:
+            raise HTTPException(500, f"Error generando ASM: {proc_asm.stderr}")
+
+        with open(asm_ruta, 'r', encoding='utf-8') as f:
+            asm_real = f.read()
+
+        proc_exe = subprocess.run(
+            ["gcc", c_ruta, "-o", exe_ruta, "-lm"],
+            capture_output=True, text=True
+        )
+        if proc_exe.returncode != 0:
+            raise HTTPException(500, f"Error compilando: {proc_exe.stderr}")
+
+        asm_guardado = base + ".asm"
+        with open(os.path.join(ARCHIVOS_DIR, asm_guardado), 'w', encoding='utf-8') as f:
+            f.write(asm_real)
+
+        return FileResponse(
+            exe_ruta,
+            media_type="application/octet-stream",
+            filename=base + ".exe"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    finally:
+        for ruta in [c_ruta, asm_ruta]:
+            if os.path.exists(ruta):
+                os.remove(ruta)
 
 @app.get("/archivos")
 def listar_archivos():
     return {"archivos": os.listdir(ARCHIVOS_DIR)}
+
+@app.get("/archivos/descargar/{nombre}")
+def descargar_archivo(nombre: str):
+    ruta = os.path.join(ARCHIVOS_DIR, nombre)
+    if not os.path.exists(ruta):
+        raise HTTPException(404, "Archivo no encontrado")
+    return FileResponse(ruta, filename=nombre, media_type='application/octet-stream')
 
 @app.get("/archivos/{nombre}")
 def cargar_archivo(nombre: str):
