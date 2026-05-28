@@ -119,12 +119,6 @@ class NodoFuncion(NodoAST):
     def optimizar(self):
         return NodoFuncion(self.tipo_retorno, self.nombre,
                            self.parametros, [c.optimizar() for c in self.cuerpo])
-    def traducirC(self):
-        params = ', '.join(p.traducirC() for p in self.parametros)
-        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo)
-        if self.nombre[1] == 'main':
-            return f"int main() {{\n    {cuerpo}\n    system(\"pause\");\n    return 0;\n}}"
-        return f"{self.tipo_retorno[1]} {self.nombre[1]}({params}) {{\n    {cuerpo}\n}}"
 
 class NodoParametro(NodoAST):
     def __init__(self, nombre, tipo, es_array=False):
@@ -134,7 +128,6 @@ class NodoParametro(NodoAST):
     def traducirJava(self): return f"{self.tipo[1]}{'[]' if self.es_array else ''} {self.nombre[1]}"
     def traducirC(self): return f"{self.tipo[1]} {'*' if self.es_array else ''}{self.nombre[1]}"
     def generarCodigo(self): return f"; param {self.tipo[1]} {self.nombre[1]}"
-    def traducirC(self): return f"{self.tipo[1]}{'[]' if self.es_array else ''} {self.nombre[1]}"
 
 class NodoAsignacion(NodoAST):
     def __init__(self, tipo, nombre, expresion, es_declaracion=True):
@@ -164,11 +157,6 @@ class NodoAsignacion(NodoAST):
 
     def optimizar(self):
         return NodoAsignacion(self.tipo, self.nombre, self.expresion.optimizar(), self.es_declaracion)
-    def traducirC(self):
-        expr = self.expresion.traducirC()
-        if self.es_declaracion and self.tipo:
-            return f"{self.tipo[1]} {self.nombre[1]} = {expr};"
-        return f"{self.nombre[1]} = {expr};"
 
 class NodoDeclaracionArray(NodoAST):
     def __init__(self, tipo, nombre, tamanio, valores=None):
@@ -194,11 +182,6 @@ class NodoDeclaracionArray(NodoAST):
 
     def generarCodigo(self):
         return f"ALLOC {self.nombre[1]}, {self.tamanio} ; {self.tipo[1]}[]"
-    def traducirC(self):
-        if self.valores:
-            vals = ', '.join(v.traducirC() for v in self.valores)
-            return f"{self.tipo[1]} {self.nombre[1]}[{self.tamanio}] = {{{vals}}};"
-        return f"{self.tipo[1]} {self.nombre[1]}[{self.tamanio}];"
 
 class NodoAsignacionArray(NodoAST):
     def __init__(self, nombre, indice, expresion):
@@ -215,8 +198,7 @@ class NodoAsignacionArray(NodoAST):
 
     def generarCodigo(self):
         return f"MOV {self.nombre[1]}[{self.indice.generarCodigo()}], {self.expresion.generarCodigo()}"
-    def traducirC(self):
-        return f"{self.nombre[1]}[{self.indice.traducirC()}] = {self.expresion.traducirC()};"
+
     def optimizar(self):
         return NodoAsignacionArray(self.nombre, self.indice.optimizar(), self.expresion.optimizar())
 
@@ -228,7 +210,6 @@ class NodoAccesoArray(NodoAST):
     def traducirJava(self): return f"{self.nombre[1]}[{self.indice.traducirJava()}]"
     def traducirC(self): return f"{self.nombre[1]}[{self.indice.traducirC()}]"
     def generarCodigo(self): return f"LOAD {self.nombre[1]}[{self.indice.generarCodigo()}]"
-    def traducirC(self): return f"{self.nombre[1]}[{self.indice.traducirC()}]"
     def optimizar(self): return NodoAccesoArray(self.nombre, self.indice.optimizar())
 
 class NodoOperacion(NodoAST):
@@ -252,8 +233,7 @@ class NodoOperacion(NodoAST):
     def generarCodigo(self):
         op = self._ASM.get(self.operador[1], self.operador[1])
         return f"{op} {self.izquierda.generarCodigo()}, {self.derecha.generarCodigo()}"
-    def traducirC(self):
-        return f"({self.izquierda.traducirC()} {self.operador[1]} {self.derecha.traducirC()})"
+    
     def optimizar(self):
         izq = self.izquierda.optimizar()
         der = self.derecha.optimizar()
@@ -274,7 +254,6 @@ class NodoNegacion(NodoAST):
     def traducirJava(self): return f"!({self.expresion.traducirJava()})"
     def traducirC(self): return f"!({self.expresion.traducirC()})"
     def generarCodigo(self): return f"NOT {self.expresion.generarCodigo()}"
-    def traducirC(self): return f"!({self.expresion.traducirC()})"
     def optimizar(self): return NodoNegacion(self.expresion.optimizar())
 
 class NodoIf(NodoAST):
@@ -314,13 +293,7 @@ class NodoIf(NodoAST):
             eb = "\n    ".join(c.generarCodigo() for c in self.cuerpo_else)
             r += f"\n    {eb}"
         return r + f"\n{lend}:"
-    def traducirC(self):
-        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo_if) or "    // TODO: cuerpo if"
-        r = f"if ({self.condicion.traducirC()}) {{\n{cuerpo}\n}}"
-        if self.cuerpo_else:
-            eb = "\n    ".join(c.traducirC() for c in self.cuerpo_else) or "    // TODO: cuerpo else"
-            r += f" else {{\n{eb}\n}}"
-        return r
+
     def optimizar(self):
         return NodoIf(self.condicion.optimizar(),
                       [c.optimizar() for c in self.cuerpo_if],
@@ -347,9 +320,7 @@ class NodoWhile(NodoAST):
         ls, le = f"while_{uid}", f"endwhile_{uid}"
         cuerpo = "\n    ".join(c.generarCodigo() for c in self.cuerpo)
         return f"{ls}:\n    CMP {self.condicion.generarCodigo()}\n    JZ {le}\n    {cuerpo}\n    JMP {ls}\n{le}:"
-    def traducirC(self):
-        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo) or "    // TODO: cuerpo while"
-        return f"while ({self.condicion.traducirC()}) {{\n{cuerpo}\n}}"
+
     def optimizar(self):
         return NodoWhile(self.condicion.optimizar(), [c.optimizar() for c in self.cuerpo])
 
@@ -387,12 +358,7 @@ class NodoFor(NodoAST):
         inc   = self.incremento.generarCodigo() if self.incremento else ""
         cuerpo = "\n    ".join(c.generarCodigo() for c in self.cuerpo)
         return f"{init}\n{ls}:\n    CMP {cond}\n    JZ {le}\n    {cuerpo}\n    {inc}\n    JMP {ls}\n{le}:"
-    def traducirC(self):
-        init  = self.init.traducirC().rstrip(";") if self.init else ""
-        cond  = self.condicion.traducirC() if self.condicion else "true"
-        inc   = self.incremento.traducirC().rstrip(";") if self.incremento else ""
-        cuerpo = "\n    ".join(c.traducirC() for c in self.cuerpo) or "    // TODO: cuerpo for"
-        return f"for ({init}; {cond}; {inc}) {{\n{cuerpo}\n}}"
+
     def optimizar(self):
         return NodoFor(
             self.init.optimizar() if self.init else None,
@@ -414,8 +380,7 @@ class NodoRetorno(NodoAST):
 
     def generarCodigo(self):
         return f"MOV eax, {self.expresion.generarCodigo()}\n    RET" if self.expresion else "RET"
-    def traducirC(self):
-        return f"return {self.expresion.traducirC()};" if self.expresion else "return;"
+
     def optimizar(self):
         return NodoRetorno(self.expresion.optimizar() if self.expresion else None)
 
@@ -426,7 +391,6 @@ class NodoIdentificador(NodoAST):
     def traducirJava(self): return self.nombre[1]
     def traducirC(self): return self.nombre[1]
     def generarCodigo(self): return self.nombre[1]
-    def traducirC(self): return self.nombre[1]
 
 class NodoNumero(NodoAST):
     def __init__(self, valor): self.valor = valor
@@ -435,7 +399,6 @@ class NodoNumero(NodoAST):
     def traducirJava(self): return str(self.valor[1])
     def traducirC(self): return str(self.valor[1])
     def generarCodigo(self): return str(self.valor[1])
-    def traducirC(self): return str(self.valor[1])
 
 class NodoFloat(NodoAST):
     def __init__(self, valor): self.valor = valor
@@ -444,7 +407,6 @@ class NodoFloat(NodoAST):
     def traducirJava(self): return f"{self.valor[1]}f"
     def traducirC(self): return f"{self.valor[1]}f"
     def generarCodigo(self): return str(self.valor[1])
-    def traducirC(self): return str(self.valor[1])
 
 class NodoString(NodoAST):
     def __init__(self, valor): self.valor = valor
@@ -453,7 +415,6 @@ class NodoString(NodoAST):
     def traducirJava(self): return self.valor[1]
     def traducirC(self): return self.valor[1]
     def generarCodigo(self): return f'DB {self.valor[1]}, 0'
-    def traducirC(self): return self.valor[1]
 
 class NodoBoolean(NodoAST):
     def __init__(self, valor): self.valor = valor
@@ -462,7 +423,6 @@ class NodoBoolean(NodoAST):
     def traducirJava(self): return self.valor[1]
     def traducirC(self): return "1" if self.valor[1] == "true" else "0"
     def generarCodigo(self): return "1" if self.valor[1] == "true" else "0"
-    def traducirC(self): return self.valor[1]
 
 class NodoLlamadaFuncion(NodoAST):
     def __init__(self, nombre_funcion, argumentos):
@@ -480,8 +440,6 @@ class NodoLlamadaFuncion(NodoAST):
     def generarCodigo(self):
         args = ', '.join(a.generarCodigo() for a in self.argumentos)
         return f"CALL {self.nombre_funcion} ; args=({args})"
-    def traducirC(self):
-        return f"{self.nombre_funcion}({', '.join(a.traducirC() for a in self.argumentos)})"
 
 class NodoPrint(NodoAST):
     def __init__(self, expresion): self.expresion = expresion
@@ -490,7 +448,6 @@ class NodoPrint(NodoAST):
     def traducirJava(self): return f"System.out.println({self.expresion.traducirJava()});"
     def traducirC(self): return f'printf("%d\\n", {self.expresion.traducirC()});'
     def generarCodigo(self): return f"PRINT {self.expresion.generarCodigo()}"
-    def traducirC(self): return f'printf("%d", {self.expresion.traducirC()});'
     def optimizar(self): return NodoPrint(self.expresion.optimizar())
 
 class NodoPrintf(NodoAST):
@@ -500,7 +457,6 @@ class NodoPrintf(NodoAST):
     def traducirJava(self): return f"System.out.printf({self.expresion.traducirJava()});"
     def traducirC(self): return f"printf({self.expresion.traducirC()});"
     def generarCodigo(self): return f"PRINTF {self.expresion.generarCodigo()}"
-    def traducirC(self): return f'printf({self.expresion.traducirC()});'
     def optimizar(self): return NodoPrintf(self.expresion.optimizar())
 
 class NodoIncrementoDecremento(NodoAST):
@@ -514,8 +470,6 @@ class NodoIncrementoDecremento(NodoAST):
     def traducirC(self): return f"{self.nombre[1]}{self.operador};"
     def generarCodigo(self):
         return f"INC {self.nombre[1]}" if self.operador == "++" else f"DEC {self.nombre[1]}"
-    def traducirC(self):
-        return f"{self.nombre[1]}{self.operador};"
 
 # ─────────────────────────────────────────────────────────────
 # TABLA DE SÍMBOLOS (con ámbitos)
